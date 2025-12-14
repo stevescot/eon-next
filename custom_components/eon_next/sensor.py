@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+from homeassistant.util import dt as dt_util
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -13,7 +14,7 @@ from homeassistant.const import (
 )
 
 from . import DOMAIN
-from .eonnext import METER_TYPE_GAS, METER_TYPE_ELECTRIC
+from .eonnext import METER_TYPE_GAS, METER_TYPE_ELECTRIC, METER_TYPE_EV
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 if meter.get_type() == METER_TYPE_GAS:
                     entities.append(LatestGasCubicMetersSensor(meter))
                     entities.append(LatestGasKwhSensor(meter))
+        
+        for charger in account.ev_chargers:
+            entities.append(SmartChargingScheduleSensor(charger))
+            entities.append(NextChargeStartSensor(charger))
+            entities.append(NextChargeEndSensor(charger))
+            entities.append(NextChargeStartSensor2(charger))
+            entities.append(NextChargeEndSensor2(charger))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -112,4 +120,110 @@ class LatestGasCubicMetersSensor(SensorEntity):
 
     async def async_update(self) -> None:
         self._attr_native_value = await self.meter.get_latest_reading()
+
+
+class SmartChargingScheduleSensor(SensorEntity):
+    """Smart Charging Schedule"""
+
+    def __init__(self, charger):
+        self.charger = charger
+
+        self._attr_name = self.charger.get_serial() + " Smart Charging Schedule"
+        self._attr_icon = "mdi:ev-station"
+        self._attr_unique_id = self.charger.get_serial() + "__" + "smart_charging_schedule"
+        self._attr_extra_state_attributes = {}
+    
+
+    async def async_update(self) -> None:
+        schedule = await self.charger.get_schedule()
+        if schedule is not None:
+            if len(schedule) > 0:
+                self._attr_native_value = "Active"
+                self._attr_extra_state_attributes["schedule"] = schedule
+            else:
+                self._attr_native_value = "No Schedule"
+                self._attr_extra_state_attributes["schedule"] = []
+        else:
+            self._attr_native_value = "Unknown"
+
+
+class NextChargeStartSensor(SensorEntity):
+    """Start time of next charge"""
+
+    def __init__(self, charger):
+        self.charger = charger
+
+        self._attr_name = self.charger.get_serial() + " Next Charge Start"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_icon = "mdi:clock-start"
+        self._attr_unique_id = self.charger.get_serial() + "__" + "next_charge_start"
+    
+
+    async def async_update(self) -> None:
+        schedule = await self.charger.get_schedule()
+        if schedule and len(schedule) > 0:
+            self._attr_native_value = dt_util.parse_datetime(schedule[0]['start'])
+        else:
+            self._attr_native_value = None
+
+
+class NextChargeEndSensor(SensorEntity):
+    """End time of next charge"""
+
+    def __init__(self, charger):
+        self.charger = charger
+
+        self._attr_name = self.charger.get_serial() + " Next Charge End"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_icon = "mdi:clock-end"
+        self._attr_unique_id = self.charger.get_serial() + "__" + "next_charge_end"
+    
+
+    async def async_update(self) -> None:
+        schedule = await self.charger.get_schedule()
+        if schedule and len(schedule) > 0:
+            self._attr_native_value = dt_util.parse_datetime(schedule[0]['end'])
+        else:
+            self._attr_native_value = None
+
+
+class NextChargeStartSensor2(SensorEntity):
+    """Start time of next charge slot 2"""
+
+    def __init__(self, charger):
+        self.charger = charger
+
+        self._attr_name = self.charger.get_serial() + " Next Charge Start 2"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_icon = "mdi:clock-start"
+        self._attr_unique_id = self.charger.get_serial() + "__" + "next_charge_start_2"
+    
+
+    async def async_update(self) -> None:
+        schedule = await self.charger.get_schedule()
+        if schedule and len(schedule) > 1:
+            self._attr_native_value = dt_util.parse_datetime(schedule[1]['start'])
+        else:
+            self._attr_native_value = None
+
+
+class NextChargeEndSensor2(SensorEntity):
+    """End time of next charge slot 2"""
+
+    def __init__(self, charger):
+        self.charger = charger
+
+        self._attr_name = self.charger.get_serial() + " Next Charge End 2"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_icon = "mdi:clock-end"
+        self._attr_unique_id = self.charger.get_serial() + "__" + "next_charge_end_2"
+    
+
+    async def async_update(self) -> None:
+        schedule = await self.charger.get_schedule()
+        if schedule and len(schedule) > 1:
+            self._attr_native_value = dt_util.parse_datetime(schedule[1]['end'])
+        else:
+            self._attr_native_value = None
+
 

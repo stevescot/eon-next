@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
+import logging
 import aiohttp
 import datetime
 
+_LOGGER = logging.getLogger(__name__)
+
 METER_TYPE_GAS = "gas"
 METER_TYPE_ELECTRIC = "electricity"
+METER_TYPE_EV = "ev"
 METER_TYPE_UNKNOWN = "unknown"
 
 
@@ -92,18 +96,30 @@ class EonNext:
     
 
     async def _graphql_post(self, operation: str, query: str, variables: dict={}, authenticated: bool = True) -> dict:
-        use_headers = {}
+        use_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
         if authenticated == True:
             use_headers['authorization'] = "JWT " + await self.__auth_token()
 
+        payload = {"operationName": operation, "variables": variables, "query": query}
+        _LOGGER.debug(f"GraphQL Payload: {payload}")
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://api.eonnext-kraken.energy/v1/graphql/",
-                json={"operationName": operation, "variables": variables, "query": query},
+                json=payload,
                 headers=use_headers
             ) as response:
-                return await response.json()
+                try:
+                    json_data = await response.json()
+                    _LOGGER.debug(f"GraphQL Response for {operation}: {json_data}")
+                    return json_data
+                except Exception as e:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to parse JSON response. Status: {response.status}. Body: {text}")
+                    raise e
     
 
     async def login_with_username_and_password(self, username: str, password: str, initialise: bool = True) -> bool:
@@ -185,6 +201,7 @@ class EonNext:
 
                 account = EnergyAccount(self, account_number)
                 await account._load_meters()
+                await account._load_ev_chargers()
 
                 self.accounts.append(account)
 
@@ -196,7 +213,27 @@ class EnergyAccount:
     def __init__(self, api: EonNext, account_number: str):
         self.api = api
         self.account_number = account_number
+        self.ev_chargers = []
     
+
+    async def _load_ev_chargers(self):
+        result = await self.api._graphql_post(
+            "getAccountDevices",
+            "query getAccountDevices($accountNumber: String!) {\n  devices(accountNumber: $accountNumber) {\n    id\n    provider\n    deviceType\n    status {\n      current\n    }\n    __typename\n    ... on SmartFlexVehicle {\n      make\n      model\n    }\n    ... on SmartFlexChargePoint {\n      make\n      model\n    }\n  }\n}\n",
+            {
+                "accountNumber": self.account_number
+            }
+        )
+
+        if self.api._json_contains_key_chain(result, ["data", "devices"]) == True:
+            for device in result['data']['devices']:
+                # We are interested in devices that are active and are either vehicles or chargers
+                # For now, we'll treat them all as "SmartCharging" entities
+                if device.get('status', {}).get('current') == 'LIVE':
+                    name = f"{device.get('make', 'Unknown')} {device.get('model', 'Device')}"
+                    charger = SmartCharging(self, device['id'], name)
+                    self.ev_chargers.append(charger)
+
 
     async def _load_meters(self):
         result = await self.api._graphql_post(
@@ -361,3 +398,30 @@ class GasMeter(EnergyMeter):
         kwh = kwh / 3.6
 
         return round(kwh)
+
+
+class SmartCharging(EnergyMeter):
+
+    def __init__(self, account: EnergyAccount, meter_id: str, serial: str):
+        super().__init__(account, meter_id, serial)
+        self.type = METER_TYPE_EV
+        self.schedule = None
+    
+
+    async def _update(self):
+        result = await self.api._graphql_post(
+            "getSmartChargingSchedule",
+            "query getSmartChargingSchedule($deviceId: String!) {\n  flexPlannedDispatches(deviceId: $deviceId) {\n    start\n    end\n    type\n    energyAddedKwh\n  }\n}\n",
+            {
+                "deviceId": self.meter_id
+            }
+        )
+
+        if self.api._json_contains_key_chain(result, ["data", "flexPlannedDispatches"]) == True:
+            self.schedule = result['data']['flexPlannedDispatches']
+            self.last_updated = datetime.datetime.now()
+
+    async def get_schedule(self):
+        await self.update()
+        return self.schedule
+
