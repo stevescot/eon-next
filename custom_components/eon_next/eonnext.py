@@ -202,6 +202,8 @@ class EonNext:
                 account = EnergyAccount(self, account_number)
                 await account._load_meters()
                 await account._load_ev_chargers()
+                await account._load_tariff_data()
+                await account._load_saving_sessions()
 
                 self.accounts.append(account)
 
@@ -214,6 +216,41 @@ class EnergyAccount:
         self.api = api
         self.account_number = account_number
         self.ev_chargers = []
+        self.tariff_data = None
+        self.saving_sessions = []
+    
+
+    async def _load_tariff_data(self):
+        """Load active tariff/agreement details for this account"""
+        result = await self.api._graphql_post(
+            "getAccountAgreements",
+            "query getAccountAgreements($accountNumber: String!) {\n  account(accountNumber: $accountNumber) {\n    agreements {\n      id\n      validFrom\n      validTo\n      tariff {\n        displayName\n        fullName\n        standingCharge\n        unitRate\n        tariffCode\n        ... on TariffType {\n          isVariable\n          tariffType\n        }\n      }\n      meterPoint {\n        mpan\n        mprn\n      }\n    }\n  }\n}\n",
+            {
+                "accountNumber": self.account_number
+            }
+        )
+        
+        if self.api._json_contains_key_chain(result, ["data", "account", "agreements"]):
+            # Store the raw agreements data
+            self.tariff_data = result['data']['account']['agreements']
+        else:
+            self.tariff_data = []
+    
+
+    async def _load_saving_sessions(self):
+        """Load saving session data (similar to Octopus Saving Sessions)"""
+        result = await self.api._graphql_post(
+            "getSavingSessions",
+            "query getSavingSessions($accountNumber: String!) {\n  savingSessions(accountNumber: $accountNumber) {\n    id\n    code\n    startAt\n    endAt\n    rewardAmount\n    state\n  }\n}\n",
+            {
+                "accountNumber": self.account_number
+            }
+        )
+        
+        if self.api._json_contains_key_chain(result, ["data", "savingSessions"]):
+            self.saving_sessions = result['data']['savingSessions']
+        else:
+            self.saving_sessions = []
     
 
     async def _load_ev_chargers(self):

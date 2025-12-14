@@ -44,6 +44,16 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             entities.append(NextChargeEndSensor(charger))
             entities.append(NextChargeStartSensor2(charger))
             entities.append(NextChargeEndSensor2(charger))
+        
+        # Add tariff sensors for the account
+        if account.tariff_data:
+            entities.append(TariffNameSensor(account))
+            entities.append(StandingChargeSensor(account))
+            entities.append(UnitRateSensor(account))
+        
+        # Add saving session sensors
+        if account.saving_sessions:
+            entities.append(SavingSessionsSensor(account))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -227,3 +237,139 @@ class NextChargeEndSensor2(SensorEntity):
             self._attr_native_value = None
 
 
+class TariffNameSensor(SensorEntity):
+    """Active tariff name for the account"""
+
+    def __init__(self, account):
+        self.account = account
+
+        self._attr_name = f"Account {self.account.account_number} Tariff Name"
+        self._attr_icon = "mdi:file-document-outline"
+        self._attr_unique_id = f"{self.account.account_number}__tariff_name"
+    
+
+    async def async_update(self) -> None:
+        await self.account._load_tariff_data()
+        if self.account.tariff_data and len(self.account.tariff_data) > 0:
+            # Get the most recent active agreement
+            active = [a for a in self.account.tariff_data if not a.get('validTo') or dt_util.parse_datetime(a['validTo']) > dt_util.now()]
+            if active:
+                tariff = active[0].get('tariff', {})
+                self._attr_native_value = tariff.get('displayName') or tariff.get('fullName')
+                self._attr_extra_state_attributes = {
+                    "tariff_code": tariff.get('tariffCode'),
+                    "tariff_type": tariff.get('tariffType'),
+                    "is_variable": tariff.get('isVariable'),
+                    "valid_from": active[0].get('validFrom'),
+                    "valid_to": active[0].get('validTo')
+                }
+            else:
+                self._attr_native_value = None
+        else:
+            self._attr_native_value = None
+
+
+class StandingChargeSensor(SensorEntity):
+    """Daily standing charge for the account"""
+
+    def __init__(self, account):
+        self.account = account
+
+        self._attr_name = f"Account {self.account.account_number} Standing Charge"
+        self._attr_icon = "mdi:currency-gbp"
+        self._attr_unit_of_measurement = "GBP/day"
+        self._attr_unique_id = f"{self.account.account_number}__standing_charge"
+    
+
+    async def async_update(self) -> None:
+        await self.account._load_tariff_data()
+        if self.account.tariff_data and len(self.account.tariff_data) > 0:
+            active = [a for a in self.account.tariff_data if not a.get('validTo') or dt_util.parse_datetime(a['validTo']) > dt_util.now()]
+            if active:
+                tariff = active[0].get('tariff', {})
+                standing_charge = tariff.get('standingCharge')
+                if standing_charge is not None:
+                    # Convert pence to pounds
+                    self._attr_native_value = round(standing_charge / 100, 4)
+                else:
+                    self._attr_native_value = None
+            else:
+                self._attr_native_value = None
+        else:
+            self._attr_native_value = None
+
+
+class UnitRateSensor(SensorEntity):
+    """Unit rate for the account"""
+
+    def __init__(self, account):
+        self.account = account
+
+        self._attr_name = f"Account {self.account.account_number} Unit Rate"
+        self._attr_icon = "mdi:currency-gbp"
+        self._attr_unit_of_measurement = "GBP/kWh"
+        self._attr_unique_id = f"{self.account.account_number}__unit_rate"
+    
+
+    async def async_update(self) -> None:
+        await self.account._load_tariff_data()
+        if self.account.tariff_data and len(self.account.tariff_data) > 0:
+            active = [a for a in self.account.tariff_data if not a.get('validTo') or dt_util.parse_datetime(a['validTo']) > dt_util.now()]
+            if active:
+                tariff = active[0].get('tariff', {})
+                unit_rate = tariff.get('unitRate')
+                if unit_rate is not None:
+                    # Convert pence to pounds
+                    self._attr_native_value = round(unit_rate / 100, 4)
+                    self._attr_extra_state_attributes = {
+                        "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn')
+                    }
+                else:
+                    self._attr_native_value = None
+            else:
+                self._attr_native_value = None
+        else:
+            self._attr_native_value = None
+
+
+class SavingSessionsSensor(SensorEntity):
+    """Upcoming and active saving sessions"""
+
+    def __init__(self, account):
+        self.account = account
+
+        self._attr_name = f"Account {self.account.account_number} Saving Sessions"
+        self._attr_icon = "mdi:piggy-bank-outline"
+        self._attr_unique_id = f"{self.account.account_number}__saving_sessions"
+    
+
+    async def async_update(self) -> None:
+        await self.account._load_saving_sessions()
+        if self.account.saving_sessions:
+            # Count active/upcoming sessions
+            now = dt_util.now()
+            upcoming = [s for s in self.account.saving_sessions if dt_util.parse_datetime(s['startAt']) > now]
+            active = [s for s in self.account.saving_sessions if dt_util.parse_datetime(s['startAt']) <= now <= dt_util.parse_datetime(s['endAt'])]
+            
+            self._attr_native_value = len(upcoming) + len(active)
+            self._attr_extra_state_attributes = {
+                "active_count": len(active),
+                "upcoming_count": len(upcoming),
+                "sessions": [
+                    {
+                        "code": s.get('code'),
+                        "start": s.get('startAt'),
+                        "end": s.get('endAt'),
+                        "reward": s.get('rewardAmount'),
+                        "state": s.get('state')
+                    }
+                    for s in self.account.saving_sessions
+                ]
+            }
+        else:
+            self._attr_native_value = 0
+            self._attr_extra_state_attributes = {
+                "active_count": 0,
+                "upcoming_count": 0,
+                "sessions": []
+            }

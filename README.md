@@ -25,6 +25,20 @@ For each connected smart charger, the following sensors are created:
 
 These sensors allow you to monitor and automate your EV charging based on Eon Next's smart charging recommendations.
 
+### Tariff Information
+For each account, the following tariff sensors are created:
+
+- **Tariff Name**: The display name of your active tariff
+- **Standing Charge**: Daily standing charge in GBP/day
+- **Unit Rate**: Energy unit rate in GBP/kWh
+
+These sensors include additional attributes such as tariff code, valid dates, and meter point information.
+
+### Saving Sessions
+If your account participates in saving sessions (similar to Octopus Energy's scheme):
+
+- **Saving Sessions**: Count of active and upcoming saving sessions, with full session details in attributes including start/end times, reward amounts, and session status
+
 
 ## Installation
 
