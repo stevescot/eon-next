@@ -318,12 +318,53 @@ class UnitRateSensor(SensorEntity):
             if active:
                 tariff = active[0].get('tariff', {})
                 unit_rate = tariff.get('unitRate')
+                
+                # Handle HalfHourlyTariff with multiple rates
+                if unit_rate is None and tariff.get('unitRates'):
+                    rates = tariff.get('unitRates')
+                    if len(rates) > 0:
+                        # Extract unique rates
+                        unique_rates = sorted(list(set([r['value'] for r in rates])))
+                        
+                        # Default to the first rate (usually low/night rate if sorted, but we want current)
+                        # Logic for Next Drive: 00:00 - 07:00 is Off-Peak (Low)
+                        is_next_drive = "Next Drive" in (tariff.get('displayName') or "")
+                        
+                        if is_next_drive and len(unique_rates) >= 2:
+                            low_rate = unique_rates[0]
+                            high_rate = unique_rates[1] # Assuming 2 rates for now
+                            
+                            now = dt_util.now()
+                            # Next Drive Off-Peak is 00:00 to 07:00
+                            if 0 <= now.hour < 7:
+                                unit_rate = low_rate
+                                current_period = "Off-Peak"
+                            else:
+                                unit_rate = high_rate
+                                current_period = "Peak"
+                                
+                            self._attr_extra_state_attributes = {
+                                "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                                "rates": unique_rates,
+                                "current_period": current_period,
+                                "low_rate": round(low_rate / 100, 4),
+                                "high_rate": round(high_rate / 100, 4)
+                            }
+                        else:
+                            # Fallback for unknown multi-rate tariffs
+                            unit_rate = rates[0].get('value')
+                            self._attr_extra_state_attributes = {
+                                "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                                "rates": unique_rates
+                            }
+
                 if unit_rate is not None:
                     # Convert pence to pounds
                     self._attr_native_value = round(unit_rate / 100, 4)
-                    self._attr_extra_state_attributes = {
-                        "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn')
-                    }
+                    if not hasattr(self, '_attr_extra_state_attributes'):
+                         self._attr_extra_state_attributes = {
+                            "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn')
+                        }
                 else:
                     self._attr_native_value = None
             else:
@@ -348,20 +389,31 @@ class SavingSessionsSensor(SensorEntity):
         if self.account.saving_sessions:
             # Count active/upcoming sessions
             now = dt_util.now()
-            upcoming = [s for s in self.account.saving_sessions if dt_util.parse_datetime(s['startAt']) > now]
-            active = [s for s in self.account.saving_sessions if dt_util.parse_datetime(s['startAt']) <= now <= dt_util.parse_datetime(s['endAt'])]
+            upcoming = []
+            active = []
             
+            for s in self.account.saving_sessions:
+                start_str = s.get('startedAt') or s.get('startAt')
+                end_str = s.get('endedAt') or s.get('endAt')
+                
+                if start_str:
+                    start_dt = dt_util.parse_datetime(start_str)
+                    if start_dt > now:
+                        upcoming.append(s)
+                    elif end_str:
+                        end_dt = dt_util.parse_datetime(end_str)
+                        if start_dt <= now <= end_dt:
+                            active.append(s)
+
             self._attr_native_value = len(upcoming) + len(active)
             self._attr_extra_state_attributes = {
                 "active_count": len(active),
                 "upcoming_count": len(upcoming),
                 "sessions": [
                     {
-                        "code": s.get('code'),
-                        "start": s.get('startAt'),
-                        "end": s.get('endAt'),
-                        "reward": s.get('rewardAmount'),
-                        "state": s.get('state')
+                        "id": s.get('id'),
+                        "start": s.get('startedAt') or s.get('startAt'),
+                        "type": s.get('type')
                     }
                     for s in self.account.saving_sessions
                 ]

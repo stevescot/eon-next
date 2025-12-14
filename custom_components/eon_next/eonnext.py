@@ -23,6 +23,8 @@ class EonNext:
 
     def _json_contains_key_chain(self, data: dict, key_chain: list) -> bool:
         for key in key_chain:
+            if data is None:
+                return False
             if key in data:
                 data = data[key]
             else:
@@ -218,37 +220,44 @@ class EnergyAccount:
         self.ev_chargers = []
         self.tariff_data = None
         self.saving_sessions = []
+        self.postcode = ""
     
 
     async def _load_tariff_data(self):
         """Load active tariff/agreement details for this account"""
         result = await self.api._graphql_post(
             "getAccountAgreements",
-            "query getAccountAgreements($accountNumber: String!) {\n  account(accountNumber: $accountNumber) {\n    agreements {\n      id\n      validFrom\n      validTo\n      tariff {\n        displayName\n        fullName\n        standingCharge\n        unitRate\n        tariffCode\n        ... on TariffType {\n          isVariable\n          tariffType\n        }\n      }\n      meterPoint {\n        mpan\n        mprn\n      }\n    }\n  }\n}\n",
+            "query getAccountAgreements($accountNumber: String!) { properties(accountNumber: $accountNumber) { electricityMeterPoints { mpan agreements { id validFrom validTo tariff { __typename ... on TariffType { displayName fullName tariffCode } ... on StandardTariff { unitRate standingCharge } ... on PrepayTariff { unitRate standingCharge } ... on HalfHourlyTariff { unitRates { value } standingCharge } } } } } }",
             {
                 "accountNumber": self.account_number
             }
         )
         
-        if self.api._json_contains_key_chain(result, ["data", "account", "agreements"]):
-            # Store the raw agreements data
-            self.tariff_data = result['data']['account']['agreements']
-        else:
-            self.tariff_data = []
+        self.tariff_data = []
+        if self.api._json_contains_key_chain(result, ["data", "properties"]):
+            for prop in result['data']['properties']:
+                if 'electricityMeterPoints' in prop:
+                    for point in prop['electricityMeterPoints']:
+                        mpan = point.get('mpan')
+                        if 'agreements' in point:
+                            for agreement in point['agreements']:
+                                # Inject meterPoint info for sensor compatibility
+                                agreement['meterPoint'] = {'mpan': mpan}
+                                self.tariff_data.append(agreement)
     
 
     async def _load_saving_sessions(self):
         """Load saving session data (similar to Octopus Saving Sessions)"""
         result = await self.api._graphql_post(
             "getSavingSessions",
-            "query getSavingSessions($accountNumber: String!) {\n  savingSessions(accountNumber: $accountNumber) {\n    id\n    code\n    startAt\n    endAt\n    rewardAmount\n    state\n  }\n}\n",
+            "query getSavingSessions($postcode: String!) { appSessions(postcode: $postcode) { edges { node { id startedAt __typename } } } }",
             {
-                "accountNumber": self.account_number
+                "postcode": self.postcode
             }
         )
         
-        if self.api._json_contains_key_chain(result, ["data", "savingSessions"]):
-            self.saving_sessions = result['data']['savingSessions']
+        if self.api._json_contains_key_chain(result, ["data", "appSessions", "edges"]):
+            self.saving_sessions = [edge['node'] for edge in result['data']['appSessions']['edges']]
         else:
             self.saving_sessions = []
     
@@ -287,6 +296,7 @@ class EnergyAccount:
         
         self.meters = []
         for property in result['data']['properties']:
+            self.postcode = property.get('postcode')
 
             for electricity_point in property['electricityMeterPoints']:
                 for meter_config in electricity_point['meters']:
