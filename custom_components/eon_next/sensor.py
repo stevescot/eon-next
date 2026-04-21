@@ -15,6 +15,7 @@ from homeassistant.const import (
 
 from . import DOMAIN
 from .eonnext import METER_TYPE_GAS, METER_TYPE_ELECTRIC, METER_TYPE_EV
+from .tariff_patterns import get_tariff_pattern, get_current_rate_index, get_current_period_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -315,60 +316,103 @@ class UnitRateSensor(SensorEntity):
 
     async def async_update(self) -> None:
         await self.account._load_tariff_data()
+        
+         # Check for active EV charger schedules
+        ev_charger_active = False
+        if self.account.ev_chargers:
+            now = dt_util.now()
+            for charger in self.account.ev_chargers:
+                schedule = await charger.get_schedule()
+                if schedule:
+                    for dispatch in schedule:
+                        start = dt_util.parse_datetime(dispatch.get('start'))
+                        end = dt_util.parse_datetime(dispatch.get('end'))
+                        if start and end and start <= now <= end:
+                            ev_charger_active = True
+                            break
+                if ev_charger_active:
+                    break
+        
         if self.account.tariff_data and len(self.account.tariff_data) > 0:
             active = [a for a in self.account.tariff_data if not a.get('validTo') or dt_util.parse_datetime(a['validTo']) > dt_util.now()]
             if active:
                 tariff = active[0].get('tariff', {})
                 unit_rate = tariff.get('unitRate')
                 
-                # Handle HalfHourlyTariff with multiple rates
+                 # Handle HalfHourlyTariff with multiple rates
                 if unit_rate is None and tariff.get('unitRates'):
                     rates = tariff.get('unitRates')
                     unique_rates = sorted(list(set([r['value'] for r in rates])))
                     now = dt_util.now()
                     
-                    if len(rates) == 48:
-                        # 48-slot half-hourly tariff — index directly from current time
-                        slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
-                        unit_rate = rates[slot]['value']
-                    elif len(rates) == 2:
-                        # 2-rate tariff (e.g., Next Drive: 00:00-07:00 Off-Peak, 07:00-24:00 Peak)
-                        # Low rate is off-peak (00:00-07:00), high rate is peak (07:00-24:00)
-                        low_rate = unique_rates[0]
-                        high_rate = unique_rates[1]
-                        
-                        if 0 <= now.hour < 7:
-                            unit_rate = low_rate  # Off-Peak
-                            current_period = "Off-Peak"
-                        else:
-                            unit_rate = high_rate  # Peak
-                            current_period = "Peak"
-                        
+                     # If EV charger is active, use the lower (off-peak) rate
+                    if ev_charger_active and len(unique_rates) >= 2:
+                        unit_rate = unique_rates[0]   # Lower rate
                         self._attr_extra_state_attributes = {
-                            "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
-                            "all_rates_p": unique_rates,
-                            "current_period": current_period,
-                            "low_rate": round(low_rate / 100, 4),
-                            "high_rate": round(high_rate / 100, 4),
-                            "rate_slots": len(rates)
-                        }
-                    elif len(rates) > 0:
-                        # Fallback: use first rate
-                        unit_rate = rates[0]['value']
+                             "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                             "all_rates_p": unique_rates,
+                             "current_period": "Charging (Off-Peak Rate Applied)",
+                             "low_rate": round(unique_rates[0] / 100, 4),
+                             "high_rate": round(unique_rates[-1] / 100, 4),
+                             "rate_slots": len(rates),
+                             "charging_active": True,
+                             "using_off_peak_rate": True
+                         }
+                    else:
+                         # Try to get tariff pattern for time-based rate selection
+                        tariff_name = tariff.get('displayName') or tariff.get('fullName') or ''
+                        pattern = get_tariff_pattern(tariff_name)
                         
-                        low_rate = unique_rates[0]
-                        high_rate = unique_rates[-1]
-                        current_period = "Off-Peak" if unit_rate == low_rate else "Peak"
-                        self._attr_extra_state_attributes = {
-                            "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
-                            "all_rates_p": unique_rates,
-                            "current_period": current_period,
-                            "low_rate": round(low_rate / 100, 4),
-                            "high_rate": round(high_rate / 100, 4),
-                            "rate_slots": len(rates)
-                        }
-
-                if unit_rate is not None:
+                        if len(rates) == 48:
+                             # 48-slot half-hourly tariff — index directly from current time
+                            slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
+                            unit_rate = rates[slot]['value']
+                            
+                            self._attr_extra_state_attributes = {
+                                 "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                                 "all_rates_p": unique_rates,
+                                 "current_slot": slot,
+                                 "rate_slots": len(rates)
+                             }
+                        elif len(rates) == 2 and pattern:
+                             # 2-rate tariff with known pattern (e.g., Next Drive, Economy 7)
+                            rate_index = get_current_rate_index(pattern, now.hour)
+                            unit_rate = rates[rate_index]['value']
+                            
+                            low_rate = unique_rates[0]
+                            high_rate = unique_rates[-1]
+                            current_period = get_current_period_name(pattern, now.hour)
+                            
+                            off_peak_str, peak_str = self._get_period_hours(pattern)
+                            
+                            self._attr_extra_state_attributes = {
+                                 "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                                 "all_rates_p": unique_rates,
+                                 "current_period": current_period,
+                                 "low_rate": round(low_rate / 100, 4),
+                                 "high_rate": round(high_rate / 100, 4),
+                                 "rate_slots": len(rates),
+                                 "off_peak_hours": off_peak_str,
+                                 "peak_hours": peak_str,
+                                 "tariff_pattern": pattern.get('description', tariff_name)
+                             }
+                        elif len(rates) > 0:
+                             # Fallback: use first rate for unknown multi-rate tariffs
+                            unit_rate = rates[0]['value']
+                            
+                            low_rate = unique_rates[0]
+                            high_rate = unique_rates[-1]
+                            current_period = "Unknown"
+                            
+                            self._attr_extra_state_attributes = {
+                                 "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                                 "all_rates_p": unique_rates,
+                                 "current_period": current_period,
+                                 "low_rate": round(low_rate / 100, 4),
+                                 "high_rate": round(high_rate / 100, 4),
+                                 "rate_slots": len(rates),
+                                 "warning": "Time-based rate selection not configured for this tariff"
+                             }
                     # Convert pence to pounds
                     self._attr_native_value = round(unit_rate / 100, 4)
                     if not self._attr_extra_state_attributes:

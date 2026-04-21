@@ -229,7 +229,7 @@ class EnergyAccount:
         """Load active tariff/agreement details for this account"""
         result = await self.api._graphql_post(
             "getAccountAgreements",
-            "query getAccountAgreements($accountNumber: String!) { properties(accountNumber: $accountNumber) { electricityMeterPoints { mpan agreements { id validFrom validTo tariff { __typename ... on TariffType { displayName fullName tariffCode } ... on StandardTariff { unitRate standingCharge } ... on PrepayTariff { unitRate standingCharge } ... on HalfHourlyTariff { unitRates { value } standingCharge } } } } } }",
+            "query getAccountAgreements($accountNumber: String!) { properties(accountNumber: $accountNumber) { electricityMeterPoints { mpan agreements { id validFrom validTo tariff { __typename ... on TariffType { displayName fullName tariffCode } ... on StandardTariff { unitRate standingCharge } ... on PrepayTariff { unitRate standingCharge } ... on HalfHourlyTariff { unitRates { value validFrom validTo rateType } standingCharge } } } } } }",
             {
                 "accountNumber": self.account_number
             }
