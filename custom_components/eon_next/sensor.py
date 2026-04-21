@@ -54,6 +54,9 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         # Add saving session sensors
         if account.saving_sessions:
             entities.append(SavingSessionsSensor(account))
+        
+        # Add billing sensors
+        entities.append(BillingHistorySensor(account))
 
     async_add_entities(entities, update_before_add=True)
 
@@ -258,8 +261,6 @@ class TariffNameSensor(SensorEntity):
                 self._attr_native_value = tariff.get('displayName') or tariff.get('fullName')
                 self._attr_extra_state_attributes = {
                     "tariff_code": tariff.get('tariffCode'),
-                    "tariff_type": tariff.get('tariffType'),
-                    "is_variable": tariff.get('isVariable'),
                     "valid_from": active[0].get('validFrom'),
                     "valid_to": active[0].get('validTo')
                 }
@@ -309,6 +310,7 @@ class UnitRateSensor(SensorEntity):
         self._attr_icon = "mdi:currency-gbp"
         self._attr_unit_of_measurement = "GBP/kWh"
         self._attr_unique_id = f"{self.account.account_number}__unit_rate"
+        self._attr_extra_state_attributes = {}
     
 
     async def async_update(self) -> None:
@@ -322,47 +324,33 @@ class UnitRateSensor(SensorEntity):
                 # Handle HalfHourlyTariff with multiple rates
                 if unit_rate is None and tariff.get('unitRates'):
                     rates = tariff.get('unitRates')
-                    if len(rates) > 0:
-                        # Extract unique rates
-                        unique_rates = sorted(list(set([r['value'] for r in rates])))
-                        
-                        # Default to the first rate (usually low/night rate if sorted, but we want current)
-                        # Logic for Next Drive: 00:00 - 07:00 is Off-Peak (Low)
-                        is_next_drive = "Next Drive" in (tariff.get('displayName') or "")
-                        
-                        if is_next_drive and len(unique_rates) >= 2:
-                            low_rate = unique_rates[0]
-                            high_rate = unique_rates[1] # Assuming 2 rates for now
-                            
-                            now = dt_util.now()
-                            # Next Drive Off-Peak is 00:00 to 07:00
-                            if 0 <= now.hour < 7:
-                                unit_rate = low_rate
-                                current_period = "Off-Peak"
-                            else:
-                                unit_rate = high_rate
-                                current_period = "Peak"
-                                
-                            self._attr_extra_state_attributes = {
-                                "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
-                                "rates": unique_rates,
-                                "current_period": current_period,
-                                "low_rate": round(low_rate / 100, 4),
-                                "high_rate": round(high_rate / 100, 4)
-                            }
-                        else:
-                            # Fallback for unknown multi-rate tariffs
-                            unit_rate = rates[0].get('value')
-                            self._attr_extra_state_attributes = {
-                                "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
-                                "rates": unique_rates
-                            }
+                    unique_rates = sorted(list(set([r['value'] for r in rates])))
+                    now = dt_util.now()
+                    
+                    if len(rates) == 48:
+                        # 48-slot half-hourly tariff — index directly from current time
+                        slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
+                        unit_rate = rates[slot]['value']
+                    elif len(rates) > 0:
+                        unit_rate = rates[0]['value']
+                    
+                    low_rate = unique_rates[0]
+                    high_rate = unique_rates[-1]
+                    current_period = "Off-Peak" if unit_rate == low_rate else "Peak"
+                    self._attr_extra_state_attributes = {
+                        "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                        "all_rates_p": unique_rates,
+                        "current_period": current_period,
+                        "low_rate": round(low_rate / 100, 4),
+                        "high_rate": round(high_rate / 100, 4),
+                        "rate_slots": len(rates)
+                    }
 
                 if unit_rate is not None:
                     # Convert pence to pounds
                     self._attr_native_value = round(unit_rate / 100, 4)
-                    if not hasattr(self, '_attr_extra_state_attributes'):
-                         self._attr_extra_state_attributes = {
+                    if not self._attr_extra_state_attributes:
+                        self._attr_extra_state_attributes = {
                             "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn')
                         }
                 else:
@@ -425,3 +413,31 @@ class SavingSessionsSensor(SensorEntity):
                 "upcoming_count": 0,
                 "sessions": []
             }
+
+
+class BillingHistorySensor(SensorEntity):
+    """Latest bill information for the account"""
+
+    def __init__(self, account):
+        self.account = account
+
+        self._attr_name = f"Account {self.account.account_number} Latest Bill"
+        self._attr_icon = "mdi:receipt"
+        self._attr_unit_of_measurement = "GBP"
+        self._attr_unique_id = f"{self.account.account_number}__latest_bill"
+    
+
+    async def async_update(self) -> None:
+        await self.account._load_billing_data()
+        if self.account.billing_data and len(self.account.billing_data) > 0:
+            # Get the most recent bill
+            latest_bill = sorted(self.account.billing_data, key=lambda x: x.get('billDate'), reverse=True)[0]
+            self._attr_native_value = latest_bill.get('amount', 0) / 100  # Convert pence to pounds
+            self._attr_extra_state_attributes = {
+                "bill_date": latest_bill.get('billDate'),
+                "due_date": latest_bill.get('dueDate'),
+                "status": latest_bill.get('status'),
+                "bill_id": latest_bill.get('id')
+            }
+        else:
+            self._attr_native_value = None

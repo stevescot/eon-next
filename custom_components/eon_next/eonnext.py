@@ -206,6 +206,7 @@ class EonNext:
                 await account._load_ev_chargers()
                 await account._load_tariff_data()
                 await account._load_saving_sessions()
+                await account._load_billing_data()
 
                 self.accounts.append(account)
 
@@ -220,6 +221,7 @@ class EnergyAccount:
         self.ev_chargers = []
         self.tariff_data = None
         self.saving_sessions = []
+        self.billing_data = []
         self.postcode = ""
     
 
@@ -261,6 +263,22 @@ class EnergyAccount:
         else:
             self.saving_sessions = []
     
+
+    async def _load_billing_data(self):
+        """Load billing history for the account"""
+        result = await self.api._graphql_post(
+            "getAccountBilling",
+            "query getAccountBilling($accountNumber: String!) { account(accountNumber: $accountNumber) { bills(first: 10) { edges { node { id billDate dueDate amount status } } } } }",
+            {
+                "accountNumber": self.account_number
+            }
+        )
+        
+        if self.api._json_contains_key_chain(result, ["data", "account", "bills", "edges"]):
+            self.billing_data = [edge['node'] for edge in result['data']['account']['bills']['edges']]
+        else:
+            self.billing_data = []
+
 
     async def _load_ev_chargers(self):
         result = await self.api._graphql_post(
@@ -453,6 +471,14 @@ class SmartCharging(EnergyMeter):
         super().__init__(account, meter_id, serial)
         self.type = METER_TYPE_EV
         self.schedule = None
+
+
+    def _should_update(self) -> bool:
+        if self.last_updated == None:
+            return True
+
+        now = datetime.datetime.now()
+        return (now - self.last_updated) >= datetime.timedelta(minutes=5)
     
 
     async def _update(self):
