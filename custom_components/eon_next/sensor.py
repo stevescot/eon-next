@@ -331,20 +331,42 @@ class UnitRateSensor(SensorEntity):
                         # 48-slot half-hourly tariff — index directly from current time
                         slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
                         unit_rate = rates[slot]['value']
+                    elif len(rates) == 2:
+                        # 2-rate tariff (e.g., Next Drive: 00:00-07:00 Off-Peak, 07:00-24:00 Peak)
+                        # Low rate is off-peak (00:00-07:00), high rate is peak (07:00-24:00)
+                        low_rate = unique_rates[0]
+                        high_rate = unique_rates[1]
+                        
+                        if 0 <= now.hour < 7:
+                            unit_rate = low_rate  # Off-Peak
+                            current_period = "Off-Peak"
+                        else:
+                            unit_rate = high_rate  # Peak
+                            current_period = "Peak"
+                        
+                        self._attr_extra_state_attributes = {
+                            "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                            "all_rates_p": unique_rates,
+                            "current_period": current_period,
+                            "low_rate": round(low_rate / 100, 4),
+                            "high_rate": round(high_rate / 100, 4),
+                            "rate_slots": len(rates)
+                        }
                     elif len(rates) > 0:
+                        # Fallback: use first rate
                         unit_rate = rates[0]['value']
-                    
-                    low_rate = unique_rates[0]
-                    high_rate = unique_rates[-1]
-                    current_period = "Off-Peak" if unit_rate == low_rate else "Peak"
-                    self._attr_extra_state_attributes = {
-                        "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
-                        "all_rates_p": unique_rates,
-                        "current_period": current_period,
-                        "low_rate": round(low_rate / 100, 4),
-                        "high_rate": round(high_rate / 100, 4),
-                        "rate_slots": len(rates)
-                    }
+                        
+                        low_rate = unique_rates[0]
+                        high_rate = unique_rates[-1]
+                        current_period = "Off-Peak" if unit_rate == low_rate else "Peak"
+                        self._attr_extra_state_attributes = {
+                            "meter_point": active[0].get('meterPoint', {}).get('mpan') or active[0].get('meterPoint', {}).get('mprn'),
+                            "all_rates_p": unique_rates,
+                            "current_period": current_period,
+                            "low_rate": round(low_rate / 100, 4),
+                            "high_rate": round(high_rate / 100, 4),
+                            "rate_slots": len(rates)
+                        }
 
                 if unit_rate is not None:
                     # Convert pence to pounds
