@@ -18,7 +18,9 @@ async def async_setup_entry(hass, entry):
     success = await api.login_with_username_and_password(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
 
     if success == True:
-
+        # Load account data from EON API
+        await api._load_accounts()
+        
         hass.data[DOMAIN][entry.entry_id] = api
 
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
