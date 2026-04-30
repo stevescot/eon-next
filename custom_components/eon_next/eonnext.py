@@ -471,6 +471,7 @@ class SmartCharging(EnergyMeter):
         super().__init__(account, meter_id, serial)
         self.type = METER_TYPE_EV
         self.schedule = None
+        self.failed_attempts = 0
 
 
     def _should_update(self) -> bool:
@@ -478,20 +479,37 @@ class SmartCharging(EnergyMeter):
             return True
 
         now = datetime.datetime.now()
-        return (now - self.last_updated) >= datetime.timedelta(minutes=5)
+        # Retry sooner if we had failures (exponential backoff: 1-5 min based on failure count)
+        retry_minutes = min(1 + self.failed_attempts, 5)
+        return (now - self.last_updated) >= datetime.timedelta(minutes=retry_minutes)
     
 
     async def _update(self):
-        result = await self.api._graphql_post(
-            "getSmartChargingSchedule",
-            "query getSmartChargingSchedule($deviceId: String!) {\n  flexPlannedDispatches(deviceId: $deviceId) {\n    start\n    end\n    type\n    energyAddedKwh\n  }\n}\n",
-            {
-                "deviceId": self.meter_id
-            }
-        )
+        try:
+            result = await self.api._graphql_post(
+                "getSmartChargingSchedule",
+                "query getSmartChargingSchedule($deviceId: String!) {\n  flexPlannedDispatches(deviceId: $deviceId) {\n    start\n    end\n    type\n    energyAddedKwh\n  }\n}\n",
+                {
+                    "deviceId": self.meter_id
+                }
+            )
 
-        if self.api._json_contains_key_chain(result, ["data", "flexPlannedDispatches"]) == True:
-            self.schedule = result['data']['flexPlannedDispatches']
+            if self.api._json_contains_key_chain(result, ["data", "flexPlannedDispatches"]) == True:
+                new_schedule = result['data']['flexPlannedDispatches']
+                if new_schedule != self.schedule:
+                    _LOGGER.debug(f"SmartCharging schedule updated for {self.serial}: {len(new_schedule)} slots")
+                self.schedule = new_schedule
+                self.failed_attempts = 0  # Reset failure counter on success
+            else:
+                _LOGGER.warning(f"SmartCharging API response missing flexPlannedDispatches for {self.serial}: {result}")
+                self.schedule = []
+                self.failed_attempts += 1
+        except Exception as e:
+            _LOGGER.error(f"SmartCharging._update() failed for {self.serial}: {e}")
+            self.schedule = []
+            self.failed_attempts += 1
+        finally:
+            # Always update timestamp to prevent API hammering on failure
             self.last_updated = datetime.datetime.now()
 
     async def get_schedule(self):
